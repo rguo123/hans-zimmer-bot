@@ -1,4 +1,5 @@
 from bs4 import BeautifulSoup
+from google.cloud import storage
 from moviepy.editor import *
 from pytube import YouTube
 from selenium import webdriver
@@ -10,12 +11,30 @@ import os
 import sys
 import time
 
-from storage import upload_file_to_bucket
+
+
+# TODO: more elegant way of setting this up
+os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "../gcp_config.json"
+client = storage.Client()
 
 DEFAULT_CHROME_PATH = "/usr/lib/chromium-browser/chromedriver"
 
 
-def download_youtube_mp3(url):
+def upload_filename_to_bucket(source_filename, dest_filename, bucket_name, rename=None):
+    """
+    Given local source file, upload file to bucket and rename to specfied
+    dest_filename. Use '/' to specify directories.
+    """
+
+    bucket = client.get_bucket(bucket_name)
+
+    # Upload a file to the bucket
+    blob = bucket.blob(dest_filename)
+
+    blob.upload_from_filename(source_filename)
+
+
+def download_youtube_mp3(url, filename, verbose=True):
     """
     Downloads a YouTube video as an MP3 file.
     
@@ -32,14 +51,16 @@ def download_youtube_mp3(url):
 
     # Convert the video to an MP3 file
     mp4_file = AudioFileClip(output_path)
-    mp3_file = os.path.splitext(output_path)[0] + ".mp3"
+    mp3_file = os.path.dirname(output_path) + "/" + filename
     mp4_file.write_audiofile(mp3_file)
 
     # Delete the original video file
     os.remove(output_path)
 
-    print("Download complete. MP3 file saved at: ", mp3_file)
-
+    if verbose:
+        print("Download complete. MP3 file saved at: ", mp3_file)
+    
+    return mp3_file
 
 
 def build_youtube_query_url(category):
@@ -93,8 +114,50 @@ def scrape_youtube_urls_from_query_page(youtube_query_url, scroll_pause_time=3, 
     return youtube_links
 
 
-query_url = build_youtube_query_url("peaceful")
-print(query_url)
-music_urls = scrape_youtube_urls_from_query_page(query_url)
+def run_youtube_scrape_job(category, bucket_name, delete_local_mp3_file=True, limit=30):
+    # TODO: execute in docker container on gcp compute instance
+    # but this should work locally for now?
 
-print(music_urls)
+    query_url = build_youtube_query_url(category)
+    music_urls = scrape_youtube_urls_from_query_page(query_url)
+
+    print(f"Number of songs: {len(music_urls)}")
+
+    idx = 0
+
+    for url in music_urls:
+    
+        if idx >= limit:
+            break
+        
+        filename = category + "_" + str(idx) + ".mp3"
+
+        # download_youtube_mp3 will return full path
+        try:
+            mp3_file = download_youtube_mp3(url, filename)
+            idx += 1
+        except:
+            # TODO: change to error logging
+            print(f"Failed to download mp3... skipping for {url}")
+
+        cloud_bucket_filename = category + "/" + filename
+        upload_filename_to_bucket(mp3_file, cloud_bucket_filename, bucket_name)
+
+        # cleanup
+        if delete_local_mp3_file:
+            os.remove(mp3_file)
+
+    return music_urls
+
+
+
+if __name__ == "__main__":
+    run_youtube_scrape_job("peaceful", "music_dataset_4995")
+
+
+# Test
+#query_url = build_youtube_query_url("peaceful")
+#print(query_url)
+#music_urls = scrape_youtube_urls_from_query_page(query_url)
+
+#print(music_urls)
